@@ -3,7 +3,7 @@
   "name": "YOUTUBE MUSIC",
   "pkg": "com.8spine.module.youtube.music",
   "file": "youtubeMusic.8spine",
-  "download": "https://raw.githubusercontent.com/Cookiesgobrr/8spinerepos/refs/heads/main/youtubeMusic.8spine",
+  "download": "youtubeMusic.8spine",
   "version": "v3.1.0",
   "code": 310,
   "type": "MODULE",
