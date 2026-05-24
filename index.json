@@ -1,15 +1,15 @@
 {
   "category:modules": [
     {
-      "id": "youtube-b",
-      "name": "YOUTUBEB",
+      "id": "youtube",
+      "name": "YOUTUBE",
       "pkg": "com.8spine.module.youtube.b",
       "file": "youtubeModuleupdated.8spine",
-      "download": "modules/youtubeModuleupdated.8spine",
-      "version": "v4.2.3",
-      "code": 423,
+      "download": "youtubeModuleupdated.8spine",
+      "version": "v1.0.1",
+      "code": 101,
       "type": "MODULE",
-      "author": "SZ",
+      "author": "gk",
       "description": "Search YouTube Music and resolve stream/download URLs through the media API.",
       "tags": [
         "YT Music",
@@ -20,14 +20,14 @@
       "featured": false,
       "trusted": false,
       "nsfw": false,
-      "size": 16006,
+      "size": 15764,
       "lang": "all",
       "folder": "modules",
       "sources": [
         {
-          "name": "YOUTUBEB",
+          "name": "YOUTUBE",
           "lang": "all",
-          "id": "youtube-b",
+          "id": "youtube",
           "baseUrl": "."
         }
       ]
