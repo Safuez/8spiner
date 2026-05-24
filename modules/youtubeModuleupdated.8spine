@@ -464,7 +464,7 @@ return {
     id: 'youtube-B',
     name: 'YOUTUBEB',
     author: 'SZ',
-    version: '4.2.2',
+    version: '4.2.3',
     labels: ['YT Music', 'Audio', 'Download', 'Settings'],
     description: 'Search YouTube Music and not resolve stream/download URLs through the media API.',
 
