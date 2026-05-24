@@ -6,7 +6,7 @@
  * nsfw: false
  */
 /**
- * YouTube Module for 8SPINE v1.0.1
+ * YouTube Module for 8SPINE v1.0.2
  */
 
 const LOG_PREFIX = '[YouTube]';
@@ -446,7 +446,7 @@ return {
     name: 'YouTube',
     author: 'gk',
     logo: 'https://www.gstatic.com/youtube/img/branding/favicon/favicon_144x144_v2.png',
-    version: '1.0.1',
+    version: '1.0.2',
     labels: ['YouTube', 'Audio', 'Download', 'Settings'],
     description: 'Stream and download from YouTube. HLS preferred with automatic mp4 fallback.',
 
