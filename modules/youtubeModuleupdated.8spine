@@ -23,7 +23,7 @@ function isVisitorDataFresh() {
 // --- Client contexts ---
 const WEB_REMIX_CONTEXT = {
     clientName: 'WEB',
-    clientVersion: '2.20260520.00.00',
+    clientVersion: '2.20250331.16.00',
     hl: 'en',
     gl: 'US',
 };
