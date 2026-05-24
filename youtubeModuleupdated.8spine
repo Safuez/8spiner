@@ -6,7 +6,7 @@
  * nsfw: false
  */
 /**
- * YouTube Module for 8SPINE v1.0.0
+ * YouTube Module for 8SPINE v1.0.1
  */
 
 const LOG_PREFIX = '[YouTube]';
@@ -26,19 +26,19 @@ function isVisitorDataFresh() {
 // --- Client contexts ---
 const WEB_CONTEXT = {
     clientName: 'WEB',
-    clientVersion: '2.20260407.01.00',
+    clientVersion: '2.20260521.00.00',
     hl: 'en',
-    gl: 'US',
+    gl: 'ID',
 };
 
 // Keep this in one place so it's easy to bump when YouTube rejects an old version.
 const IOS_CLIENT_BASE = {
     clientName: 'IOS',
-    clientVersion: '20.10.01',
+    clientVersion: '21.21.03',
     deviceMake: 'Apple',
-    deviceModel: 'iPhone16,2',
+    deviceModel: 'iPhone14,7',
     osName: 'iPhone',
-    osVersion: '18.3.2.22D82',
+    osVersion: '26.5.0.23F77',
     hl: 'en',
 };
 
@@ -131,7 +131,7 @@ async function searchTracks(query, limit = 20) {
         'Content-Type': 'application/json',
         'Origin': YT_BASE,
         'Referer': YT_BASE + '/',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
     };
 
     const response = await fetch(YT_BASE + '/youtubei/v1/search?key=' + YT_API_KEY, {
@@ -208,7 +208,7 @@ async function fetchPlayerData(trackId) {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'User-Agent': 'com.google.ios.youtube/20.10.01 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X)',
+            'User-Agent': 'com.google.ios.youtube/21.21.03 (iPhone14,7; U; CPU iOS 26_5_0 like Mac OS X)',
         },
         body: JSON.stringify({
             context: { client: clientContext },
@@ -345,7 +345,7 @@ async function getAlbum(albumId) {
         'Content-Type': 'application/json',
         'Origin': YT_BASE,
         'Referer': YT_BASE + '/',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
     };
 
     const response = await fetch(YT_BASE + '/youtubei/v1/browse?key=' + YT_API_KEY, {
@@ -422,9 +422,9 @@ async function getAlbum(albumId) {
 return {
     id: 'youtube',
     name: 'YouTube',
-    author: 'morgk',
+    author: 'gk',
     logo: 'https://www.gstatic.com/youtube/img/branding/favicon/favicon_144x144_v2.png',
-    version: '1.0.0',
+    version: '1.0.1',
     labels: ['YouTube', 'Audio', 'Download', 'Settings'],
     description: 'Stream and download from YouTube. HLS preferred with automatic mp4 fallback.',
 
