@@ -1,0 +1,456 @@
+/* @8spine-meta
+ * type: MODULE
+ * category: modules
+ * featured: false
+ * trusted: false
+ * nsfw: false
+ */
+/**
+ * YouTube Module for 8SPINE v1.0.0
+ */
+
+const LOG_PREFIX = '[YouTube]';
+
+const YT_BASE = 'https://www.youtube.com';
+const YT_API_KEY = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
+
+// --- visitorData cache with TTL ---
+const VISITOR_DATA_TTL_MS = 20 * 60 * 1000; // 20 minutes
+let _visitorData = null;
+let _visitorDataFetchedAt = 0;
+
+function isVisitorDataFresh() {
+    return _visitorData !== null && (Date.now() - _visitorDataFetchedAt) < VISITOR_DATA_TTL_MS;
+}
+
+// --- Client contexts ---
+const WEB_CONTEXT = {
+    clientName: 'WEB',
+    clientVersion: '2.20260407.01.00',
+    hl: 'en',
+    gl: 'US',
+};
+
+// Keep this in one place so it's easy to bump when YouTube rejects an old version.
+const IOS_CLIENT_BASE = {
+    clientName: 'IOS',
+    clientVersion: '20.10.01',
+    deviceMake: 'Apple',
+    deviceModel: 'iPhone16,2',
+    osName: 'iPhone',
+    osVersion: '18.3.2.22D82',
+    hl: 'en',
+};
+
+// --- Quality ---
+const QUALITY = {
+    LOW: 'LOW',
+    HIGH: 'HIGH',
+    LOSSLESS: 'LOSSLESS',
+};
+
+const QUALITY_OPTIONS = [
+    { label: 'Low (saves data)', value: QUALITY.LOW },
+    { label: 'High', value: QUALITY.HIGH },
+    { label: 'Best Available', value: QUALITY.LOSSLESS },
+];
+
+// Download quality is a cosmetic label only — the y2jar API has no quality selector.
+// The value is stored in returned track metadata so the app can display it.
+const DOWNLOAD_QUALITY_OPTIONS = [
+    { label: '128 kbps', value: '128' },
+    { label: '320 kbps', value: '320' },
+];
+
+const DOWNLOAD_API_BASE = 'https://capi.y2jar.cc/scr/';
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function parseDuration(text) {
+    if (!text) return 0;
+    const parts = text.split(':').map(Number);
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    return parts[0] || 0;
+}
+
+function bestThumbnail(thumbnails) {
+    if (!thumbnails || !thumbnails.length) return '';
+    return thumbnails.reduce((best, t) =>
+        (t.width || 0) > (best.width || 0) ? t : best
+    ).url;
+}
+
+function buildIosContext(visitorData) {
+    const ctx = Object.assign({}, IOS_CLIENT_BASE);
+    if (visitorData) ctx.visitorData = visitorData;
+    return ctx;
+}
+
+// ---------------------------------------------------------------------------
+// visitorData — proactive init + TTL refresh
+// ---------------------------------------------------------------------------
+
+async function fetchFreshVisitorData() {
+    try {
+        const resp = await fetch(YT_BASE + '/youtubei/v1/visitor_id?key=' + YT_API_KEY, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ context: { client: WEB_CONTEXT } }),
+        });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const d = await resp.json();
+        if (d?.responseContext?.visitorData) {
+            _visitorData = d.responseContext.visitorData;
+            _visitorDataFetchedAt = Date.now();
+            console.log(LOG_PREFIX, 'visitorData refreshed');
+        }
+    } catch (e) {
+        console.log(LOG_PREFIX, 'visitorData fetch failed:', e.message);
+    }
+}
+
+async function getVisitorData() {
+    if (!isVisitorDataFresh()) {
+        await fetchFreshVisitorData();
+    }
+    return _visitorData;
+}
+
+// Proactively warm the visitorData cache so the first play has no cold-start delay.
+fetchFreshVisitorData();
+
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+
+async function searchTracks(query, limit = 20) {
+    const headers = {
+        'Content-Type': 'application/json',
+        'Origin': YT_BASE,
+        'Referer': YT_BASE + '/',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    };
+
+    const response = await fetch(YT_BASE + '/youtubei/v1/search?key=' + YT_API_KEY, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+            context: { client: WEB_CONTEXT },
+            query,
+            // No params — youtube.com does not use the WEB_REMIX proto filter
+        }),
+    });
+
+    if (!response.ok) throw new Error(LOG_PREFIX + ' Search failed: HTTP ' + response.status);
+    const data = await response.json();
+
+    // Opportunistically refresh visitorData from search response.
+    if (data?.responseContext?.visitorData) {
+        _visitorData = data.responseContext.visitorData;
+        _visitorDataFetchedAt = Date.now();
+    }
+
+    const tracks = [];
+
+    // youtube.com uses twoColumnSearchResultsRenderer → primaryContents
+    const sections =
+        data?.contents?.twoColumnSearchResultsRenderer?.primaryContents
+            ?.sectionListRenderer?.contents || [];
+
+    for (const section of sections) {
+        const items = section?.itemSectionRenderer?.contents || [];
+        for (const item of items) {
+            if (tracks.length >= limit) break;
+
+            // Standard video result
+            const vr = item.videoRenderer;
+            if (!vr?.videoId) continue;
+
+            const title = vr.title?.runs?.map(r => r.text).join('') || '';
+            const artist =
+                vr.longBylineText?.runs?.map(r => r.text).join('') ||
+                vr.shortBylineText?.runs?.map(r => r.text).join('') ||
+                '';
+            const durationText = vr.lengthText?.simpleText || '';
+            const thumbs = vr.thumbnail?.thumbnails || [];
+
+            tracks.push({
+                id: vr.videoId,
+                title,
+                artist,
+                album: '',
+                duration: parseDuration(durationText),
+                albumCover: bestThumbnail(thumbs),
+            });
+        }
+        if (tracks.length >= limit) break;
+    }
+
+    return { tracks, total: tracks.length };
+}
+
+// ---------------------------------------------------------------------------
+// Player — fetch fresh at play-time, never pre-cached
+// ---------------------------------------------------------------------------
+
+/**
+ * Calls the YouTube player endpoint and returns raw streamingData.
+ * Always fetches a fresh URL — never return a previously cached manifest.
+ */
+async function fetchPlayerData(trackId) {
+    const visitorData = await getVisitorData();
+    const clientContext = buildIosContext(visitorData);
+
+    const response = await fetch(YT_BASE + '/youtubei/v1/player?prettyPrint=false', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': 'com.google.ios.youtube/20.10.01 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X)',
+        },
+        body: JSON.stringify({
+            context: { client: clientContext },
+            videoId: trackId,
+            contentCheckOk: true,
+            racyCheckOk: true,
+        }),
+    });
+
+    if (!response.ok) throw new Error(LOG_PREFIX + ' Player HTTP error: ' + response.status);
+    const data = await response.json();
+
+    const status = data?.playabilityStatus?.status;
+    console.log(LOG_PREFIX, 'Player status:', status, 'for', trackId);
+
+    if (status !== 'OK') {
+        // visitorData might be stale — bust the cache so the next call retries.
+        _visitorData = null;
+        _visitorDataFetchedAt = 0;
+        throw new Error(
+            LOG_PREFIX + ' Playback blocked: ' +
+            (data?.playabilityStatus?.reason || status || 'unknown')
+        );
+    }
+
+    return data.streamingData;
+}
+
+/**
+ * Pick the best direct mp4 audio URL from adaptiveFormats.
+ */
+function pickMp4Url(sd, quality) {
+    const mp4Formats = (sd.adaptiveFormats || [])
+        .filter(f => f.mimeType?.startsWith('audio/mp4') && f.url);
+    if (!mp4Formats.length) return null;
+    mp4Formats.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+    return quality === QUALITY.LOW
+        ? mp4Formats[mp4Formats.length - 1].url
+        : mp4Formats[0].url;
+}
+
+/**
+ * Main entry point called by 8SPINE.
+ *
+ * @param {string}  trackId
+ * @param {string}  preferredQuality
+ * @param {object}  context            — 8SPINE context object
+ * @param {boolean} [forceDirectMp4]   — pass true to skip HLS and use mp4 directly
+ *                                       (call this way if the player signals HLS failure)
+ */
+async function getTrackStreamUrl(trackId, preferredQuality, context, forceDirectMp4 = false) {
+    const quality = context?.settings?.quality?.value || preferredQuality || QUALITY.HIGH;
+    console.log(LOG_PREFIX, 'Getting stream for', trackId, '| quality:', quality, '| forceDirectMp4:', forceDirectMp4);
+
+    // Always hit the player endpoint fresh — never serve a stale/pre-fetched URL.
+    const sd = await fetchPlayerData(trackId);
+
+    if (!sd) throw new Error(LOG_PREFIX + ' No streaming data returned');
+
+    // Strategy 1: HLS manifest (preferred — native iOS/AVPlayer support)
+    // Only use if not explicitly asked to skip it.
+    if (!forceDirectMp4 && sd.hlsManifestUrl) {
+        console.log(LOG_PREFIX, 'Using HLS for', trackId);
+        return {
+            streamUrl: sd.hlsManifestUrl,
+            streamType: 'hls',
+            // Expose a fallback helper so the host player can call it if HLS fails.
+            onHlsError: () => getTrackStreamUrl(trackId, quality, context, true),
+            track: { id: trackId, audioQuality: quality },
+        };
+    }
+
+    // Strategy 2: Direct mp4 audio URL (fallback)
+    const mp4Url = pickMp4Url(sd, quality);
+    if (mp4Url) {
+        console.log(LOG_PREFIX, 'Using direct mp4 for', trackId);
+        return {
+            streamUrl: mp4Url,
+            streamType: 'mp4',
+            track: { id: trackId, audioQuality: quality },
+        };
+    }
+
+    throw new Error(LOG_PREFIX + ' No playable audio found for ' + trackId);
+}
+
+// ---------------------------------------------------------------------------
+// Download
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns a download URL for the given track via the y2jar API.
+ *
+ * Note: the y2jar API (capi.y2jar.cc) does not accept a quality parameter —
+ * it always returns a single URL regardless of what you send. The
+ * `downloadQuality` setting is therefore a cosmetic label only; it is stored
+ * in the returned track metadata so the app can display the chosen quality
+ * to the user, but it does not change the actual file served.
+ *
+ * @param {string} trackId
+ * @param {string} [quality]   — ignored by the API, kept for signature parity
+ * @param {object} [context]   — 8SPINE context object
+ */
+async function getTrackDownloadUrl(trackId, quality, context) {
+    const dlQuality = context?.settings?.downloadQuality?.value || quality || '128';
+    console.log(LOG_PREFIX, 'Getting download URL for', trackId, '| quality label:', dlQuality);
+
+    const response = await fetch(DOWNLOAD_API_BASE + trackId + '?s=5');
+    if (!response.ok) {
+        throw new Error(LOG_PREFIX + ' Download API error: HTTP ' + response.status);
+    }
+
+    const data = await response.json();
+    if (!data.downloadUrl) {
+        throw new Error(LOG_PREFIX + ' No download URL returned for ' + trackId);
+    }
+
+    return {
+        streamUrl: data.downloadUrl,
+        track: {
+            id: trackId,
+            // Map the label to an internal quality tag for the app's metadata display.
+            audioQuality: dlQuality === '320' ? QUALITY.HIGH : QUALITY.LOW,
+        },
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Album / Playlist browsing
+// ---------------------------------------------------------------------------
+
+async function getAlbum(albumId) {
+    const headers = {
+        'Content-Type': 'application/json',
+        'Origin': YT_BASE,
+        'Referer': YT_BASE + '/',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    };
+
+    const response = await fetch(YT_BASE + '/youtubei/v1/browse?key=' + YT_API_KEY, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+            context: { client: WEB_CONTEXT },
+            browseId: albumId,
+        }),
+    });
+
+    if (!response.ok) throw new Error(LOG_PREFIX + ' Album fetch failed: HTTP ' + response.status);
+    const data = await response.json();
+
+    if (data?.responseContext?.visitorData) {
+        _visitorData = data.responseContext.visitorData;
+        _visitorDataFetchedAt = Date.now();
+    }
+
+    // youtube.com playlist/album header
+    const header = data?.header?.playlistHeaderRenderer || {};
+    const albumTitle =
+        header?.title?.simpleText ||
+        header?.title?.runs?.map(r => r.text).join('') || '';
+    const albumArtist =
+        header?.ownerText?.runs?.[0]?.text ||
+        header?.subtitle?.runs?.[0]?.text || '';
+    const albumCover = bestThumbnail(
+        header?.thumbnail?.thumbnails ||
+        header?.playlistHeaderBanner?.heroPlaylistThumbnailRenderer
+            ?.thumbnail?.thumbnails || []
+    );
+
+    // youtube.com playlist contents live under twoColumnBrowseResultsRenderer
+    const tabContents =
+        data?.contents?.twoColumnBrowseResultsRenderer
+            ?.tabs?.[0]?.tabRenderer?.content?.sectionListRenderer?.contents || [];
+
+    const tracks = [];
+    for (const section of tabContents) {
+        const items = section?.itemSectionRenderer?.contents || [];
+        for (const item of items) {
+            const pvr = item.playlistVideoRenderer;
+            if (!pvr?.videoId) continue;
+
+            const title = pvr.title?.runs?.map(r => r.text).join('') ||
+                          pvr.title?.simpleText || '';
+            const artist =
+                pvr.shortBylineText?.runs?.map(r => r.text).join('') || albumArtist;
+            const durationText = pvr.lengthText?.simpleText || '';
+            const thumbs = pvr.thumbnail?.thumbnails || [];
+
+            tracks.push({
+                id: pvr.videoId,
+                title,
+                artist,
+                album: albumTitle,
+                duration: parseDuration(durationText),
+                albumCover: bestThumbnail(thumbs) || albumCover,
+            });
+        }
+    }
+
+    return {
+        album: { id: albumId, title: albumTitle, artist: albumArtist, albumCover },
+        tracks,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Module export
+// ---------------------------------------------------------------------------
+
+return {
+    id: 'youtube',
+    name: 'YouTube',
+    author: 'morgk',
+    logo: 'https://www.gstatic.com/youtube/img/branding/favicon/favicon_144x144_v2.png',
+    version: '1.0.0',
+    labels: ['YouTube', 'Audio', 'Download', 'Settings'],
+    description: 'Stream and download from YouTube. HLS preferred with automatic mp4 fallback.',
+
+    // YouTube stream URLs expire quickly — tell the app to always fetch fresh at play-time.
+    noPrefetch: true,
+    noStreamCache: true,
+
+    settings: {
+        quality: {
+            type: 'selector',
+            label: 'Audio Quality',
+            description: 'Select preferred streaming quality',
+            options: QUALITY_OPTIONS,
+            defaultValue: QUALITY.HIGH,
+        },
+        downloadQuality: {
+            type: 'selector',
+            label: 'Download Quality',
+            description: 'Quality label for downloaded tracks (cosmetic — the download API does not support quality selection)',
+            options: DOWNLOAD_QUALITY_OPTIONS,
+            defaultValue: '128',
+        },
+    },
+
+    searchTracks,
+    getTrackStreamUrl,
+    getTrackDownloadUrl,
+    getAlbum,
+};
