@@ -454,10 +454,10 @@ async function getAlbum(albumId) {
 // ---------------------------------------------------------------------------
 
 return {
-    id: 'youtube-planB',
-    name: 'YouTube Music Backup',
-    author: 'nvmindl+morgk',
-    version: '4.2.0',
+    id: 'youtube-B',
+    name: 'YOUTUBEB',
+    author: 'SZ',
+    version: '4.2.1',
     labels: ['YT Music', 'Audio', 'Download', 'Settings'],
     description: 'Search YouTube Music and not resolve stream/download URLs through the media API.',
 
