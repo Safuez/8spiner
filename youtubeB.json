@@ -1,7 +1,7 @@
 {
-  "id": "youtubeB",
-  "name": "YOUTUBEB",
-  "pkg": "com.8spine.module.youtube.b",
+  "id": "youtube",
+  "name": "YOUTUBE",
+  "pkg": "com.8spine.module.youtubeb",
   "file": "youtubeB.8spine",
   "download": "youtubeB.8spine",
   "version": "v0.6.7",
