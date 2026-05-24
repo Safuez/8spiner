@@ -1,16 +1,16 @@
 {
-  "id": "youtube-music",
-  "name": "YOUTUBE MUSIC",
-  "pkg": "com.8spine.module.youtube.music",
-  "file": "youtubeMusic.8spine",
-  "download": "youtubeMusic.8spine",
-  "version": "v3.1.0",
+  "id": "youtubeB",
+  "name": "YOUTUBEB",
+  "pkg": "com.8spine.module.youtube.b",
+  "file": "youtubeB.8spine",
+  "download": "youtubeB.8spine",
+  "version": "v0.6.7",
   "code": 310,
   "type": "MODULE",
-  "author": "nvmindl",
-  "description": "STREAM AND DOWNLOAD FROM YOUTUBE MUSIC. HLS PREFERRED WITH AUTOMATIC MP4 FALLBACK.",
+  "author": "SZ",
+  "description": "Test Module.",
   "tags": [
-    "YT MUSIC",
+    "YT",
     "AUDIO",
     "DOWNLOAD"
   ],
@@ -22,10 +22,10 @@
   "folder": "modules",
   "sources": [
     {
-      "name": "YOUTUBE MUSIC",
+      "name": "YOUTUBEB",
       "lang": "all",
-      "id": "youtube-music",
-      "baseUrl": "https://8spine-modules.vercel.app/"
+      "id": "youtube-B",
+      "baseUrl": ""
     }
   ]
 }
