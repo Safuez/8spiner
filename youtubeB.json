@@ -5,7 +5,7 @@
   "file": "youtubeB.8spine",
   "download": "youtubeB.8spine",
   "version": "v4.2.1",
-  "code": 310,
+  "code": 510,
   "type": "MODULE",
   "author": "SZ",
   "description": "Test Module.",
@@ -17,7 +17,7 @@
   "featured": false,
   "trusted": false,
   "nsfw": false,
-  "size": 15872,
+  "size": 15898,
   "lang": "all",
   "folder": "modules",
   "sources": [
