@@ -25,7 +25,7 @@ const WEB_REMIX_CONTEXT = {
     clientName: 'WEB',
     clientVersion: '2.20250331.16.00',
     hl: 'en',
-    gl: 'US',
+    gl: 'ID',
 };
 
 // Keep this in one place so it's easy to bump when YouTube rejects an old version.
