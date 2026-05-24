@@ -159,7 +159,7 @@ async function searchTracks(query, limit = 20) {
         body: JSON.stringify({
             context: { client: WEB_REMIX_CONTEXT },
             query,
-            params: 'EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D',
+            params: '',
         }),
     });
 
