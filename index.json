@@ -10,9 +10,9 @@
       "code": 101,
       "type": "MODULE",
       "author": "gk",
-      "description": "Search YouTube Music and resolve stream/download URLs through the media API.",
+      "description": "Search YouTube and resolve stream/download URLs through the media API.",
       "tags": [
-        "YT Music",
+        "YouTube",
         "Audio",
         "Download",
         "Settings"
