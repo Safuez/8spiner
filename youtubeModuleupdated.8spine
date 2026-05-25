@@ -6,8 +6,8 @@
  * nsfw: false
  */
 /**
- * YouTube Module for 8SPINE v1.0.3
- * FIXED: Proper handling of expiring video stream URLs with cache-busting and retry logic
+ * YouTube Module for 8SPINE v1.0.4
+ * FIXED: Aggressive anti-caching for expiring video stream URLs
  */
 
 const LOG_PREFIX = '[YouTube]';
@@ -19,6 +19,9 @@ const YT_API_KEY = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
 const VISITOR_DATA_TTL_MS = 20 * 60 * 1000; // 20 minutes
 let _visitorData = null;
 let _visitorDataFetchedAt = 0;
+
+// Track last fetched URLs to detect stale data
+const _urlCache = {};
 
 function isVisitorDataFresh() {
     return _visitorData !== null && (Date.now() - _visitorDataFetchedAt) < VISITOR_DATA_TTL_MS;
@@ -64,6 +67,7 @@ const DOWNLOAD_QUALITY_OPTIONS = [
 ];
 
 const DOWNLOAD_API_BASE = 'https://capi.y2jar.cc/scr/';
+const ALTERNATIVE_DOWNLOAD_API_BASE = 'https://api.y2jar.cc/scr/';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -88,6 +92,11 @@ function buildIosContext(visitorData) {
     const ctx = Object.assign({}, IOS_CLIENT_BASE);
     if (visitorData) ctx.visitorData = visitorData;
     return ctx;
+}
+
+// Generate unique cache buster
+function getCacheBuster() {
+    return Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
 }
 
 // ---------------------------------------------------------------------------
@@ -242,8 +251,9 @@ async function fetchPlayerData(trackId) {
 // Shared API resolver for stream + download
 // ---------------------------------------------------------------------------
 
-function buildDownloadApiUrl(trackId) {
-    return DOWNLOAD_API_BASE + encodeURIComponent(trackId) + '?s=5';
+function buildDownloadApiUrl(trackId, apiBase = DOWNLOAD_API_BASE) {
+    const cacheBuster = getCacheBuster();
+    return apiBase + encodeURIComponent(trackId) + '?s=5&cb=' + cacheBuster;
 }
 
 function normalizeApiUrl(data) {
@@ -261,39 +271,60 @@ function normalizeApiUrl(data) {
  * Calls the media API and returns a direct media URL.
  * Used for BOTH streaming and downloading.
  * 
- * FIXED: Added cache-busting and proper error handling for expired URLs
+ * FIXED: Aggressive anti-caching with random cache buster, multiple API endpoints, and URL rotation
  */
 async function getApiMediaUrl(trackId) {
     if (!trackId) {
         throw new Error(LOG_PREFIX + ' Missing trackId');
     }
 
-    // Add timestamp to bust any proxy/browser caching
-    const timestamp = Date.now();
-    const apiUrl = buildDownloadApiUrl(trackId) + '&t=' + timestamp;
-    console.log(LOG_PREFIX, 'Calling media API:', apiUrl);
+    const apiEndpoints = [
+        DOWNLOAD_API_BASE,
+        ALTERNATIVE_DOWNLOAD_API_BASE,
+    ];
 
-    const response = await fetch(apiUrl, {
-        method: 'GET',
-        headers: {
-            'Accept': 'application/json',
-            'Cache-Control': 'no-cache, no-store, must-revalidate',
-            'Pragma': 'no-cache',
-        },
-    });
+    let lastError;
+    
+    // Try each API endpoint
+    for (let endpointIdx = 0; endpointIdx < apiEndpoints.length; endpointIdx++) {
+        const apiBase = apiEndpoints[endpointIdx];
+        const apiUrl = buildDownloadApiUrl(trackId, apiBase);
+        
+        console.log(LOG_PREFIX, 'Calling media API:', apiUrl, '(endpoint', endpointIdx + 1 + ')');
 
-    if (!response.ok) {
-        throw new Error(LOG_PREFIX + ' Media API error: HTTP ' + response.status);
+        try {
+            const response = await fetch(apiUrl, {
+                method: 'GET',
+                headers: {
+                    'Accept': 'application/json',
+                    'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
+                    'Pragma': 'no-cache, no-store',
+                    'Expires': '0',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                },
+            });
+
+            if (!response.ok) {
+                throw new Error('HTTP ' + response.status);
+            }
+
+            const data = await response.json();
+            const mediaUrl = normalizeApiUrl(data);
+
+            if (!mediaUrl) {
+                throw new Error('No media URL returned');
+            }
+
+            console.log(LOG_PREFIX, 'Got media URL from endpoint', endpointIdx + 1);
+            _urlCache[trackId] = mediaUrl;
+            return mediaUrl;
+        } catch (e) {
+            lastError = e;
+            console.log(LOG_PREFIX, 'Endpoint', endpointIdx + 1, 'failed:', e.message);
+        }
     }
 
-    const data = await response.json();
-    const mediaUrl = normalizeApiUrl(data);
-
-    if (!mediaUrl) {
-        throw new Error(LOG_PREFIX + ' No media URL returned for ' + trackId);
-    }
-
-    return mediaUrl;
+    throw lastError || new Error(LOG_PREFIX + ' Failed to get media URL for ' + trackId);
 }
 
 // ---------------------------------------------------------------------------
@@ -304,7 +335,7 @@ async function getApiMediaUrl(trackId) {
  * Main stream entry point called by 8SPINE.
  * Streaming now uses the media API instead of YouTube HLS manifests.
  * 
- * FIXED: Added retry logic to handle expired stream URLs on second play
+ * FIXED: Aggressive retry with multiple API endpoints and unique cache busters
  *
  * @param {string}  trackId
  * @param {string}  preferredQuality
@@ -316,7 +347,7 @@ async function getTrackStreamUrl(trackId, preferredQuality, context) {
 
     let mediaUrl;
     let lastError;
-    const maxRetries = 3;
+    const maxRetries = 5;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
@@ -327,12 +358,14 @@ async function getTrackStreamUrl(trackId, preferredQuality, context) {
             }
         } catch (error) {
             lastError = error;
-            console.log(LOG_PREFIX, 'Attempt', attempt, 'failed:', error.message);
+            console.log(LOG_PREFIX, 'Stream attempt', attempt, 'failed:', error.message);
             
             if (attempt < maxRetries) {
-                // Wait before retrying (exponential backoff: 500ms, 1000ms, etc.)
-                const delayMs = 500 * attempt;
-                console.log(LOG_PREFIX, 'Retrying in', delayMs, 'ms...');
+                // Exponential backoff with jitter: 200-800ms, 400-1600ms, 600-2400ms, etc.
+                const baseDelay = 200 * attempt;
+                const jitter = Math.random() * baseDelay;
+                const delayMs = baseDelay + jitter;
+                console.log(LOG_PREFIX, 'Retrying in', Math.round(delayMs), 'ms...');
                 await new Promise(resolve => setTimeout(resolve, delayMs));
             }
         }
@@ -342,8 +375,13 @@ async function getTrackStreamUrl(trackId, preferredQuality, context) {
         throw lastError || new Error(LOG_PREFIX + ' Failed to get stream URL after ' + maxRetries + ' attempts');
     }
 
+    // Force unique stream URL each time to prevent app-level caching
+    const uniqueStreamUrl = mediaUrl.includes('?') 
+        ? mediaUrl + '&_t=' + getCacheBuster()
+        : mediaUrl + '?_t=' + getCacheBuster();
+
     return {
-        streamUrl: mediaUrl,
+        streamUrl: uniqueStreamUrl,
         streamType: 'direct',
         track: {
             id: trackId,
@@ -359,13 +397,13 @@ async function getTrackStreamUrl(trackId, preferredQuality, context) {
 /**
  * Returns a download URL for the given track via the y2jar API.
  *
- * Note: the y2jar API (capi.y2jar.cc) does not accept a quality parameter —
+ * Note: the y2jar API does not accept a quality parameter —
  * it always returns a single URL regardless of what you send. The
  * `downloadQuality` setting is therefore a cosmetic label only; it is stored
  * in the returned track metadata so the app can display the chosen quality
  * to the user, but it does not change the actual file served.
  * 
- * FIXED: Added cache-busting and retry logic
+ * FIXED: Aggressive retry with multiple endpoints and unique cache busters
  *
  * @param {string} trackId
  * @param {string} [quality]   — ignored by the API, kept for signature parity
@@ -377,7 +415,7 @@ async function getTrackDownloadUrl(trackId, quality, context) {
 
     let mediaUrl;
     let lastError;
-    const maxRetries = 3;
+    const maxRetries = 5;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
@@ -391,8 +429,10 @@ async function getTrackDownloadUrl(trackId, quality, context) {
             console.log(LOG_PREFIX, 'Download attempt', attempt, 'failed:', error.message);
             
             if (attempt < maxRetries) {
-                const delayMs = 500 * attempt;
-                console.log(LOG_PREFIX, 'Retrying download in', delayMs, 'ms...');
+                const baseDelay = 200 * attempt;
+                const jitter = Math.random() * baseDelay;
+                const delayMs = baseDelay + jitter;
+                console.log(LOG_PREFIX, 'Retrying download in', Math.round(delayMs), 'ms...');
                 await new Promise(resolve => setTimeout(resolve, delayMs));
             }
         }
@@ -402,8 +442,13 @@ async function getTrackDownloadUrl(trackId, quality, context) {
         throw lastError || new Error(LOG_PREFIX + ' Failed to get download URL after ' + maxRetries + ' attempts');
     }
 
+    // Force unique download URL each time
+    const uniqueDownloadUrl = mediaUrl.includes('?') 
+        ? mediaUrl + '&_t=' + getCacheBuster()
+        : mediaUrl + '?_t=' + getCacheBuster();
+
     return {
-        streamUrl: mediaUrl,
+        streamUrl: uniqueDownloadUrl,
         track: {
             id: trackId,
             // Map the label to an internal quality tag for the app's metadata display.
@@ -500,9 +545,9 @@ return {
     name: 'YouTube',
     author: 'gk',
     logo: 'https://www.gstatic.com/youtube/img/branding/favicon/favicon_144x144_v2.png',
-    version: '1.0.3',
+    version: '1.0.4',
     labels: ['YouTube', 'Audio', 'Download', 'Settings'],
-    description: 'Stream and download from YouTube. HLS preferred with automatic mp4 fallback.',
+    description: 'Stream and download from YouTube. Fresh URLs on every play — no caching.',
 
     // YouTube stream URLs expire quickly — tell the app to always fetch fresh at play-time.
     noPrefetch: true,
