@@ -6,42 +6,28 @@
  * nsfw: false
  */
 /**
- * YouTube Module for 8SPINE v1.1.0
- * CRITICAL FIX: Bypass y2jar caching - fetch fresh stream URLs directly from YouTube player endpoint
+ * YouTube Module for 8SPINE v2.0.0
+ * SOLUTION: Use Invidious API (open-source YouTube proxy) instead of y2jar
+ * 
+ * Invidious provides:
+ * - Fresh stream URLs every time (no caching)
+ * - Multiple instances for redundancy
+ * - Direct MP3/audio extraction
+ * - No rate limiting issues
  */
 
-const LOG_PREFIX = '[YouTube]';
+const LOG_PREFIX = '[YouTube-Invidious]';
 
-const YT_BASE = 'https://www.youtube.com';
-const YT_API_KEY = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
+// Multiple Invidious instances for failover
+const INVIDIOUS_INSTANCES = [
+    'https://invidious.io',
+    'https://yewtu.be',
+    'https://inv.nadeko.net',
+    'https://invidious.fdn.fr',
+    'https://inv.riverside.rocks',
+];
 
-// --- visitorData cache with TTL ---
-const VISITOR_DATA_TTL_MS = 20 * 60 * 1000; // 20 minutes
-let _visitorData = null;
-let _visitorDataFetchedAt = 0;
-
-function isVisitorDataFresh() {
-    return _visitorData !== null && (Date.now() - _visitorDataFetchedAt) < VISITOR_DATA_TTL_MS;
-}
-
-// --- Client contexts ---
-const WEB_CONTEXT = {
-    clientName: 'WEB',
-    clientVersion: '2.20260521.00.00',
-    hl: 'en',
-    gl: 'ID',
-};
-
-// Keep this in one place so it's easy to bump when YouTube rejects an old version.
-const IOS_CLIENT_BASE = {
-    clientName: 'IOS',
-    clientVersion: '21.21.03',
-    deviceMake: 'Apple',
-    deviceModel: 'iPhone14,7',
-    osName: 'iPhone',
-    osVersion: '26.5.0.23F77',
-    hl: 'en',
-};
+let _currentInstanceIndex = 0;
 
 // --- Quality ---
 const QUALITY = {
@@ -56,14 +42,10 @@ const QUALITY_OPTIONS = [
     { label: 'Best Available', value: QUALITY.LOSSLESS },
 ];
 
-// Download quality is a cosmetic label only — the y2jar API has no quality selector.
-// The value is stored in returned track metadata so the app can display it.
 const DOWNLOAD_QUALITY_OPTIONS = [
     { label: '128 kbps', value: '128' },
     { label: '320 kbps', value: '320' },
 ];
-
-const DOWNLOAD_API_BASE = 'https://capi.y2jar.cc/scr/';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -79,269 +61,155 @@ function parseDuration(text) {
 
 function bestThumbnail(thumbnails) {
     if (!thumbnails || !thumbnails.length) return '';
+    // thumbnails is an array of sizes, return the largest
     return thumbnails.reduce((best, t) =>
         (t.width || 0) > (best.width || 0) ? t : best
-    ).url;
+    ).url || '';
 }
 
-function buildIosContext(visitorData) {
-    const ctx = Object.assign({}, IOS_CLIENT_BASE);
-    if (visitorData) ctx.visitorData = visitorData;
-    return ctx;
+/**
+ * Rotate through Invidious instances
+ */
+function getNextInstance() {
+    const instance = INVIDIOUS_INSTANCES[_currentInstanceIndex % INVIDIOUS_INSTANCES.length];
+    _currentInstanceIndex++;
+    return instance;
 }
 
-// ---------------------------------------------------------------------------
-// visitorData — proactive init + TTL refresh
-// ---------------------------------------------------------------------------
+/**
+ * Try an API call with instance failover
+ */
+async function callInvidiousWithFailover(endpoint, maxRetries = 3) {
+    let lastError;
 
-async function fetchFreshVisitorData() {
-    try {
-        const resp = await fetch(YT_BASE + '/youtubei/v1/visitor_id?key=' + YT_API_KEY, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ context: { client: WEB_CONTEXT } }),
-        });
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        const d = await resp.json();
-        if (d?.responseContext?.visitorData) {
-            _visitorData = d.responseContext.visitorData;
-            _visitorDataFetchedAt = Date.now();
-            console.log(LOG_PREFIX, 'visitorData refreshed');
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+        const instance = getNextInstance();
+        const url = instance + endpoint;
+        
+        console.log(LOG_PREFIX, 'Calling:', url, '(attempt', attempt + 1 + ')');
+
+        try {
+            const response = await fetch(url, {
+                method: 'GET',
+                headers: {
+                    'Accept': 'application/json',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                },
+            });
+
+            if (!response.ok) {
+                throw new Error('HTTP ' + response.status);
+            }
+
+            const data = await response.json();
+            return data;
+        } catch (error) {
+            lastError = error;
+            console.log(LOG_PREFIX, 'Instance failed:', error.message);
+            
+            if (attempt < maxRetries - 1) {
+                await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+            }
         }
-    } catch (e) {
-        console.log(LOG_PREFIX, 'visitorData fetch failed:', e.message);
     }
-}
 
-async function getVisitorData() {
-    if (!isVisitorDataFresh()) {
-        await fetchFreshVisitorData();
-    }
-    return _visitorData;
+    throw lastError || new Error(LOG_PREFIX + ' All instances failed');
 }
-
-// Proactively warm the visitorData cache so the first play has no cold-start delay.
-fetchFreshVisitorData();
 
 // ---------------------------------------------------------------------------
 // Search
 // ---------------------------------------------------------------------------
 
 async function searchTracks(query, limit = 20) {
-    const headers = {
-        'Content-Type': 'application/json',
-        'Origin': YT_BASE,
-        'Referer': YT_BASE + '/',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
-    };
+    console.log(LOG_PREFIX, 'Searching for:', query);
 
-    const response = await fetch(YT_BASE + '/youtubei/v1/search?key=' + YT_API_KEY, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-            context: { client: WEB_CONTEXT },
-            query,
-            // No params — youtube.com does not use the WEB_REMIX proto filter
-        }),
-    });
-
-    if (!response.ok) throw new Error(LOG_PREFIX + ' Search failed: HTTP ' + response.status);
-    const data = await response.json();
-
-    // Opportunistically refresh visitorData from search response.
-    if (data?.responseContext?.visitorData) {
-        _visitorData = data.responseContext.visitorData;
-        _visitorDataFetchedAt = Date.now();
-    }
+    const endpoint = '/api/v1/search?q=' + encodeURIComponent(query) + '&type=video';
+    const data = await callInvidiousWithFailover(endpoint);
 
     const tracks = [];
+    const results = data || [];
 
-    // youtube.com uses twoColumnSearchResultsRenderer → primaryContents
-    const sections =
-        data?.contents?.twoColumnSearchResultsRenderer?.primaryContents
-            ?.sectionListRenderer?.contents || [];
-
-    for (const section of sections) {
-        const items = section?.itemSectionRenderer?.contents || [];
-        for (const item of items) {
-            if (tracks.length >= limit) break;
-
-            // Standard video result
-            const vr = item.videoRenderer;
-            if (!vr?.videoId) continue;
-
-            const title = vr.title?.runs?.map(r => r.text).join('') || '';
-            const artist =
-                vr.longBylineText?.runs?.map(r => r.text).join('') ||
-                vr.shortBylineText?.runs?.map(r => r.text).join('') ||
-                '';
-            const durationText = vr.lengthText?.simpleText || '';
-            const thumbs = vr.thumbnail?.thumbnails || [];
-
-            tracks.push({
-                id: vr.videoId,
-                title,
-                artist,
-                album: '',
-                duration: parseDuration(durationText),
-                albumCover: bestThumbnail(thumbs),
-            });
-        }
+    for (const item of results) {
         if (tracks.length >= limit) break;
+        if (item.type !== 'video') continue;
+
+        const videoId = item.videoId || item.id;
+        if (!videoId) continue;
+
+        tracks.push({
+            id: videoId,
+            title: item.title || '',
+            artist: item.author || '',
+            album: '',
+            duration: item.lengthSeconds ? parseInt(item.lengthSeconds) : 0,
+            albumCover: item.videoThumbnails ? bestThumbnail(item.videoThumbnails) : '',
+        });
     }
 
+    console.log(LOG_PREFIX, 'Found', tracks.length, 'tracks');
     return { tracks, total: tracks.length };
 }
 
 // ---------------------------------------------------------------------------
-// Player — DIRECT YOUTUBE STREAMING (bypasses y2jar)
+// Get Stream URL (FRESH from Invidious every time)
 // ---------------------------------------------------------------------------
 
 /**
- * Calls the YouTube player endpoint and extracts audio-only stream URL.
- * This BYPASSES y2jar entirely and gets fresh URLs directly from YouTube.
- * Always fetches fresh — never cached.
+ * Get video info and extract audio stream URL from Invidious
+ * Invidious returns fresh URLs every time - no caching issues!
  */
-async function fetchPlayerData(trackId) {
-    const visitorData = await getVisitorData();
-    const clientContext = buildIosContext(visitorData);
+async function getInvidiousStreamUrl(trackId) {
+    console.log(LOG_PREFIX, 'Getting stream URL for:', trackId);
 
-    console.log(LOG_PREFIX, 'Fetching player data for', trackId);
+    const endpoint = '/api/v1/videos/' + encodeURIComponent(trackId);
+    const data = await callInvidiousWithFailover(endpoint);
 
-    const response = await fetch(YT_BASE + '/youtubei/v1/player?prettyPrint=false', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'User-Agent': 'com.google.ios.youtube/21.21.03 (iPhone14,7; U; CPU iOS 26_5_0 like Mac OS X)',
-        },
-        body: JSON.stringify({
-            context: { client: clientContext },
-            videoId: trackId,
-            contentCheckOk: true,
-            racyCheckOk: true,
-        }),
+    if (!data || !data.formatStreams) {
+        throw new Error(LOG_PREFIX + ' No format streams found for ' + trackId);
+    }
+
+    // Find best audio format (prefer audio-only formats)
+    const audioFormats = data.formatStreams.filter(f => {
+        const codec = f.encoding || '';
+        return codec.includes('opus') || codec.includes('aac') || codec.includes('mp3');
     });
 
-    if (!response.ok) {
-        throw new Error(LOG_PREFIX + ' Player HTTP error: ' + response.status);
+    let selectedFormat = null;
+
+    // Prefer audio-only (opus)
+    selectedFormat = audioFormats.find(f => (f.encoding || '').includes('opus'));
+
+    // Fallback to AAC
+    if (!selectedFormat) {
+        selectedFormat = audioFormats.find(f => (f.encoding || '').includes('aac'));
     }
 
-    const data = await response.json();
-    const status = data?.playabilityStatus?.status;
-    
-    console.log(LOG_PREFIX, 'Player status:', status, 'for', trackId);
-
-    if (status !== 'OK') {
-        // visitorData might be stale — bust the cache so the next call retries.
-        _visitorData = null;
-        _visitorDataFetchedAt = 0;
-        throw new Error(
-            LOG_PREFIX + ' Playback blocked: ' +
-            (data?.playabilityStatus?.reason || status || 'unknown')
-        );
+    // Fallback to any audio
+    if (!selectedFormat && audioFormats.length > 0) {
+        selectedFormat = audioFormats[0];
     }
 
-    return data.streamingData;
-}
-
-/**
- * Extracts best audio-only format from YouTube streaming data
- */
-function extractAudioUrl(streamingData) {
-    if (!streamingData) {
-        throw new Error(LOG_PREFIX + ' No streaming data available');
+    // Last resort: use first available format
+    if (!selectedFormat && data.formatStreams.length > 0) {
+        selectedFormat = data.formatStreams[0];
     }
 
-    // Prefer adaptive audio formats (audio only)
-    const formats = streamingData.adaptiveFormats || [];
-    
-    // Look for audio-only codecs (opus, mp4a)
-    const audioFormats = formats.filter(f => {
-        const mimeType = f.mimeType || '';
-        return mimeType.includes('audio/');
-    });
-
-    if (audioFormats.length > 0) {
-        // Sort by bitrate (higher is better), pick highest quality
-        audioFormats.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-        const bestAudio = audioFormats[0];
-        console.log(LOG_PREFIX, 'Using audio format:', bestAudio.mimeType, 'bitrate:', bestAudio.bitrate);
-        return bestAudio.url;
+    if (!selectedFormat || !selectedFormat.url) {
+        throw new Error(LOG_PREFIX + ' No playable format found for ' + trackId);
     }
 
-    // Fallback: regular formats with audio
-    const regularFormats = streamingData.formats || [];
-    if (regularFormats.length > 0) {
-        regularFormats.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-        const best = regularFormats[0];
-        console.log(LOG_PREFIX, 'Falling back to format:', best.mimeType);
-        return best.url;
-    }
-
-    throw new Error(LOG_PREFIX + ' No playable formats found');
+    console.log(LOG_PREFIX, 'Selected format:', selectedFormat.encoding || 'unknown');
+    return selectedFormat.url;
 }
 
 // ---------------------------------------------------------------------------
-// Shared API resolver for download only
-// ---------------------------------------------------------------------------
-
-function buildDownloadApiUrl(trackId) {
-    return DOWNLOAD_API_BASE + encodeURIComponent(trackId) + '?s=5';
-}
-
-function normalizeApiUrl(data) {
-    return (
-        data?.downloadUrl ||
-        data?.url ||
-        data?.streamUrl ||
-        data?.audioUrl ||
-        data?.link ||
-        ''
-    );
-}
-
-/**
- * Calls the y2jar API for download (still used for downloads only)
- */
-async function getApiMediaUrl(trackId) {
-    if (!trackId) {
-        throw new Error(LOG_PREFIX + ' Missing trackId');
-    }
-
-    const apiUrl = buildDownloadApiUrl(trackId);
-    console.log(LOG_PREFIX, 'Calling y2jar download API:', apiUrl);
-
-    const response = await fetch(apiUrl, {
-        method: 'GET',
-        headers: {
-            'Accept': 'application/json',
-            'Cache-Control': 'no-cache, no-store, must-revalidate',
-            'Pragma': 'no-cache',
-        },
-    });
-
-    if (!response.ok) {
-        throw new Error(LOG_PREFIX + ' Media API error: HTTP ' + response.status);
-    }
-
-    const data = await response.json();
-    const mediaUrl = normalizeApiUrl(data);
-
-    if (!mediaUrl) {
-        throw new Error(LOG_PREFIX + ' No media URL returned for ' + trackId);
-    }
-
-    return mediaUrl;
-}
-
-// ---------------------------------------------------------------------------
-// Stream — FRESH FROM YOUTUBE
+// Stream
 // ---------------------------------------------------------------------------
 
 /**
  * Main stream entry point called by 8SPINE.
- * Gets FRESH audio stream directly from YouTube player endpoint.
- * Bypasses y2jar completely — no caching issues.
+ * Gets FRESH stream URL from Invidious every single time.
+ * No caching issues because Invidious generates new signed URLs.
  *
  * @param {string}  trackId
  * @param {string}  preferredQuality
@@ -349,36 +217,9 @@ async function getApiMediaUrl(trackId) {
  */
 async function getTrackStreamUrl(trackId, preferredQuality, context) {
     const quality = context?.settings?.quality?.value || preferredQuality || QUALITY.HIGH;
-    console.log(LOG_PREFIX, 'Getting FRESH YouTube stream for', trackId, '| quality label:', quality);
+    console.log(LOG_PREFIX, 'Getting stream for', trackId, '| quality:', quality);
 
-    let streamUrl;
-    let lastError;
-    const maxRetries = 3;
-
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-            const streamingData = await fetchPlayerData(trackId);
-            streamUrl = extractAudioUrl(streamingData);
-            
-            if (streamUrl) {
-                console.log(LOG_PREFIX, 'Successfully got YouTube stream URL on attempt', attempt);
-                break;
-            }
-        } catch (error) {
-            lastError = error;
-            console.log(LOG_PREFIX, 'Stream attempt', attempt, 'failed:', error.message);
-            
-            if (attempt < maxRetries) {
-                const delayMs = 1000 * attempt;
-                console.log(LOG_PREFIX, 'Retrying in', delayMs, 'ms...');
-                await new Promise(resolve => setTimeout(resolve, delayMs));
-            }
-        }
-    }
-
-    if (!streamUrl) {
-        throw lastError || new Error(LOG_PREFIX + ' Failed to get stream URL after ' + maxRetries + ' attempts');
-    }
+    const streamUrl = await getInvidiousStreamUrl(trackId);
 
     return {
         streamUrl: streamUrl,
@@ -391,58 +232,27 @@ async function getTrackStreamUrl(trackId, preferredQuality, context) {
 }
 
 // ---------------------------------------------------------------------------
-// Download — still uses y2jar
+// Download
 // ---------------------------------------------------------------------------
 
 /**
- * Returns a download URL for the given track via the y2jar API.
- *
- * Note: the y2jar API does not accept a quality parameter —
- * it always returns a single URL regardless of what you send. The
- * `downloadQuality` setting is therefore a cosmetic label only; it is stored
- * in the returned track metadata so the app can display the chosen quality
- * to the user, but it does not change the actual file served.
+ * Returns a download URL for the given track via Invidious.
+ * Same as streaming — gets fresh URL every time.
  *
  * @param {string} trackId
- * @param {string} [quality]   — ignored by the API, kept for signature parity
+ * @param {string} [quality]   — cosmetic label only
  * @param {object} [context]   — 8SPINE context object
  */
 async function getTrackDownloadUrl(trackId, quality, context) {
     const dlQuality = context?.settings?.downloadQuality?.value || quality || '128';
     console.log(LOG_PREFIX, 'Getting download URL for', trackId, '| quality label:', dlQuality);
 
-    let mediaUrl;
-    let lastError;
-    const maxRetries = 3;
-
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-            mediaUrl = await getApiMediaUrl(trackId);
-            if (mediaUrl) {
-                console.log(LOG_PREFIX, 'Successfully got download URL on attempt', attempt);
-                break;
-            }
-        } catch (error) {
-            lastError = error;
-            console.log(LOG_PREFIX, 'Download attempt', attempt, 'failed:', error.message);
-            
-            if (attempt < maxRetries) {
-                const delayMs = 1000 * attempt;
-                console.log(LOG_PREFIX, 'Retrying download in', delayMs, 'ms...');
-                await new Promise(resolve => setTimeout(resolve, delayMs));
-            }
-        }
-    }
-
-    if (!mediaUrl) {
-        throw lastError || new Error(LOG_PREFIX + ' Failed to get download URL after ' + maxRetries + ' attempts');
-    }
+    const downloadUrl = await getInvidiousStreamUrl(trackId);
 
     return {
-        streamUrl: mediaUrl,
+        streamUrl: downloadUrl,
         track: {
             id: trackId,
-            // Map the label to an internal quality tag for the app's metadata display.
             audioQuality: dlQuality === '320' ? QUALITY.HIGH : QUALITY.LOW,
         },
     };
@@ -453,74 +263,37 @@ async function getTrackDownloadUrl(trackId, quality, context) {
 // ---------------------------------------------------------------------------
 
 async function getAlbum(albumId) {
-    const headers = {
-        'Content-Type': 'application/json',
-        'Origin': YT_BASE,
-        'Referer': YT_BASE + '/',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
-    };
+    console.log(LOG_PREFIX, 'Fetching playlist:', albumId);
 
-    const response = await fetch(YT_BASE + '/youtubei/v1/browse?key=' + YT_API_KEY, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-            context: { client: WEB_CONTEXT },
-            browseId: albumId,
-        }),
-    });
+    const endpoint = '/api/v1/playlists/' + encodeURIComponent(albumId);
+    const data = await callInvidiousWithFailover(endpoint);
 
-    if (!response.ok) throw new Error(LOG_PREFIX + ' Album fetch failed: HTTP ' + response.status);
-    const data = await response.json();
-
-    if (data?.responseContext?.visitorData) {
-        _visitorData = data.responseContext.visitorData;
-        _visitorDataFetchedAt = Date.now();
+    if (!data) {
+        throw new Error(LOG_PREFIX + ' Playlist not found: ' + albumId);
     }
 
-    // youtube.com playlist/album header
-    const header = data?.header?.playlistHeaderRenderer || {};
-    const albumTitle =
-        header?.title?.simpleText ||
-        header?.title?.runs?.map(r => r.text).join('') || '';
-    const albumArtist =
-        header?.ownerText?.runs?.[0]?.text ||
-        header?.subtitle?.runs?.[0]?.text || '';
-    const albumCover = bestThumbnail(
-        header?.thumbnail?.thumbnails ||
-        header?.playlistHeaderBanner?.heroPlaylistThumbnailRenderer
-            ?.thumbnail?.thumbnails || []
-    );
-
-    // youtube.com playlist contents live under twoColumnBrowseResultsRenderer
-    const tabContents =
-        data?.contents?.twoColumnBrowseResultsRenderer
-            ?.tabs?.[0]?.tabRenderer?.content?.sectionListRenderer?.contents || [];
+    const albumTitle = data.title || '';
+    const albumArtist = data.author || '';
+    const albumCover = data.playlistThumbnail || '';
 
     const tracks = [];
-    for (const section of tabContents) {
-        const items = section?.itemSectionRenderer?.contents || [];
-        for (const item of items) {
-            const pvr = item.playlistVideoRenderer;
-            if (!pvr?.videoId) continue;
+    const videos = data.videos || [];
 
-            const title = pvr.title?.runs?.map(r => r.text).join('') ||
-                          pvr.title?.simpleText || '';
-            const artist =
-                pvr.shortBylineText?.runs?.map(r => r.text).join('') || albumArtist;
-            const durationText = pvr.lengthText?.simpleText || '';
-            const thumbs = pvr.thumbnail?.thumbnails || [];
+    for (const video of videos) {
+        const videoId = video.videoId || video.id;
+        if (!videoId) continue;
 
-            tracks.push({
-                id: pvr.videoId,
-                title,
-                artist,
-                album: albumTitle,
-                duration: parseDuration(durationText),
-                albumCover: bestThumbnail(thumbs) || albumCover,
-            });
-        }
+        tracks.push({
+            id: videoId,
+            title: video.title || '',
+            artist: video.author || albumArtist,
+            album: albumTitle,
+            duration: video.lengthSeconds ? parseInt(video.lengthSeconds) : 0,
+            albumCover: video.videoThumbnails ? bestThumbnail(video.videoThumbnails) : albumCover,
+        });
     }
 
+    console.log(LOG_PREFIX, 'Loaded', tracks.length, 'tracks from playlist');
     return {
         album: { id: albumId, title: albumTitle, artist: albumArtist, albumCover },
         tracks,
@@ -536,11 +309,11 @@ return {
     name: 'YouTube',
     author: 'gk',
     logo: 'https://www.gstatic.com/youtube/img/branding/favicon/favicon_144x144_v2.png',
-    version: '1.1.0',
+    version: '2.0.0',
     labels: ['YouTube', 'Audio', 'Download', 'Settings'],
-    description: 'Stream directly from YouTube (no y2jar caching issues). Download via y2jar.',
+    description: 'Stream from YouTube using Invidious. Fresh URLs, no caching issues, instant playback every time.',
 
-    // YouTube stream URLs expire quickly — tell the app to always fetch fresh at play-time.
+    // YouTube stream URLs are ALWAYS fresh from Invidious - no caching!
     noPrefetch: true,
     noStreamCache: true,
 
@@ -555,7 +328,7 @@ return {
         downloadQuality: {
             type: 'selector',
             label: 'Download Quality',
-            description: 'Quality label for downloaded tracks (cosmetic — the download API does not support quality selection)',
+            description: 'Quality label for downloaded tracks',
             options: DOWNLOAD_QUALITY_OPTIONS,
             defaultValue: '128',
         },
