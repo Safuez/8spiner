@@ -6,12 +6,13 @@
  * nsfw: false
  */
 /**
- * YouTube Module for 8SPINE v1.0.2
+ * YouTube Module for 8SPINE v2.0.1
  */
 
 const LOG_PREFIX = '[YouTube]';
 
 const YT_BASE = 'https://www.youtube.com';
+
 const YT_API_KEY = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
 
 // --- visitorData cache with TTL ---
@@ -57,6 +58,7 @@ const QUALITY_OPTIONS = [
 
 // Download quality is a cosmetic label only — the y2jar API has no quality selector.
 // The value is stored in returned track metadata so the app can display it.
+
 const DOWNLOAD_QUALITY_OPTIONS = [
     { label: '128 kbps', value: '128' },
     { label: '320 kbps', value: '320' },
@@ -84,6 +86,7 @@ function bestThumbnail(thumbnails) {
 }
 
 function buildIosContext(visitorData) {
+
     const ctx = Object.assign({}, IOS_CLIENT_BASE);
     if (visitorData) ctx.visitorData = visitorData;
     return ctx;
@@ -95,12 +98,14 @@ function buildIosContext(visitorData) {
 
 async function fetchFreshVisitorData() {
     try {
+
         const resp = await fetch(YT_BASE + '/youtubei/v1/visitor_id?key=' + YT_API_KEY, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ context: { client: WEB_CONTEXT } }),
         });
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
+
         const d = await resp.json();
         if (d?.responseContext?.visitorData) {
             _visitorData = d.responseContext.visitorData;
@@ -127,6 +132,7 @@ fetchFreshVisitorData();
 // ---------------------------------------------------------------------------
 
 async function searchTracks(query, limit = 20) {
+
     const headers = {
         'Content-Type': 'application/json',
         'Origin': YT_BASE,
@@ -145,6 +151,7 @@ async function searchTracks(query, limit = 20) {
     });
 
     if (!response.ok) throw new Error(LOG_PREFIX + ' Search failed: HTTP ' + response.status);
+
     const data = await response.json();
 
     // Opportunistically refresh visitorData from search response.
@@ -156,11 +163,13 @@ async function searchTracks(query, limit = 20) {
     const tracks = [];
 
     // youtube.com uses twoColumnSearchResultsRenderer → primaryContents
+
     const sections =
         data?.contents?.twoColumnSearchResultsRenderer?.primaryContents
             ?.sectionListRenderer?.contents || [];
 
     for (const section of sections) {
+
         const items = section?.itemSectionRenderer?.contents || [];
         for (const item of items) {
             if (tracks.length >= limit) break;
@@ -170,11 +179,14 @@ async function searchTracks(query, limit = 20) {
             if (!vr?.videoId) continue;
 
             const title = vr.title?.runs?.map(r => r.text).join('') || '';
+
             const artist =
                 vr.longBylineText?.runs?.map(r => r.text).join('') ||
                 vr.shortBylineText?.runs?.map(r => r.text).join('') ||
                 '';
+
             const durationText = vr.lengthText?.simpleText || '';
+
             const thumbs = vr.thumbnail?.thumbnails || [];
 
             tracks.push({
@@ -202,6 +214,7 @@ async function searchTracks(query, limit = 20) {
  */
 async function fetchPlayerData(trackId) {
     const visitorData = await getVisitorData();
+
     const clientContext = buildIosContext(visitorData);
 
     const response = await fetch(YT_BASE + '/youtubei/v1/player?prettyPrint=false', {
@@ -212,13 +225,14 @@ async function fetchPlayerData(trackId) {
         },
         body: JSON.stringify({
             context: { client: clientContext },
-            videoId: trackId,
+            videoId: trackId + '_' + Date.now(),
             contentCheckOk: true,
             racyCheckOk: true,
         }),
     });
 
     if (!response.ok) throw new Error(LOG_PREFIX + ' Player HTTP error: ' + response.status);
+
     const data = await response.json();
 
     const status = data?.playabilityStatus?.status;
@@ -280,6 +294,7 @@ async function getApiMediaUrl(trackId) {
     }
 
     const data = await response.json();
+
     const mediaUrl = normalizeApiUrl(data);
 
     if (!mediaUrl) {
@@ -303,15 +318,20 @@ async function getApiMediaUrl(trackId) {
  */
 async function getTrackStreamUrl(trackId, preferredQuality, context) {
     const quality = context?.settings?.quality?.value || preferredQuality || QUALITY.HIGH;
+
     console.log(LOG_PREFIX, 'Getting API stream for', trackId, '| quality label:', quality);
 
     const mediaUrl = await getApiMediaUrl(trackId);
 
+    // cache buster
+    const freshUrl =
+        mediaUrl + (mediaUrl.includes('?') ? '&' : '?') + '_t=' + Date.now();
+
     return {
-        streamUrl: mediaUrl,
+        streamUrl: freshUrl,
         streamType: 'direct',
         track: {
-            id: trackId,
+            id: trackId + '_' + Date.now(),
             audioQuality: quality,
         },
     };
@@ -351,7 +371,7 @@ async function getTrackDownloadUrl(trackId, quality, context) {
     return {
         streamUrl: data.downloadUrl,
         track: {
-            id: trackId,
+            id: trackId + '_' + Date.now(),
             // Map the label to an internal quality tag for the app's metadata display.
             audioQuality: dlQuality === '320' ? QUALITY.HIGH : QUALITY.LOW,
         },
@@ -446,7 +466,7 @@ return {
     name: 'YouTube',
     author: 'gk',
     logo: 'https://www.gstatic.com/youtube/img/branding/favicon/favicon_144x144_v2.png',
-    version: '1.0.2',
+    version: '2.0.1',
     labels: ['YouTube', 'Audio', 'Download', 'Settings'],
     description: 'Stream and download from YouTube. HLS preferred with automatic mp4 fallback.',
 
