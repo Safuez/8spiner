@@ -6,7 +6,8 @@
  * nsfw: false
  */
 /**
- * YouTube Module for 8SPINE v1.0.1
+ * YouTube Module for 8SPINE v1.0.3
+ * FIXED: Proper handling of expiring video stream URLs with cache-busting and retry logic
  */
 
 const LOG_PREFIX = '[YouTube]';
@@ -237,62 +238,118 @@ async function fetchPlayerData(trackId) {
     return data.streamingData;
 }
 
-/**
- * Pick the best direct mp4 audio URL from adaptiveFormats.
- */
-function pickMp4Url(sd, quality) {
-    const mp4Formats = (sd.adaptiveFormats || [])
-        .filter(f => f.mimeType?.startsWith('audio/mp4') && f.url);
-    if (!mp4Formats.length) return null;
-    mp4Formats.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-    return quality === QUALITY.LOW
-        ? mp4Formats[mp4Formats.length - 1].url
-        : mp4Formats[0].url;
+// ---------------------------------------------------------------------------
+// Shared API resolver for stream + download
+// ---------------------------------------------------------------------------
+
+function buildDownloadApiUrl(trackId) {
+    return DOWNLOAD_API_BASE + encodeURIComponent(trackId) + '?s=5';
+}
+
+function normalizeApiUrl(data) {
+    return (
+        data?.downloadUrl ||
+        data?.url ||
+        data?.streamUrl ||
+        data?.audioUrl ||
+        data?.link ||
+        ''
+    );
 }
 
 /**
- * Main entry point called by 8SPINE.
+ * Calls the media API and returns a direct media URL.
+ * Used for BOTH streaming and downloading.
+ * 
+ * FIXED: Added cache-busting and proper error handling for expired URLs
+ */
+async function getApiMediaUrl(trackId) {
+    if (!trackId) {
+        throw new Error(LOG_PREFIX + ' Missing trackId');
+    }
+
+    // Add timestamp to bust any proxy/browser caching
+    const timestamp = Date.now();
+    const apiUrl = buildDownloadApiUrl(trackId) + '&t=' + timestamp;
+    console.log(LOG_PREFIX, 'Calling media API:', apiUrl);
+
+    const response = await fetch(apiUrl, {
+        method: 'GET',
+        headers: {
+            'Accept': 'application/json',
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+        },
+    });
+
+    if (!response.ok) {
+        throw new Error(LOG_PREFIX + ' Media API error: HTTP ' + response.status);
+    }
+
+    const data = await response.json();
+    const mediaUrl = normalizeApiUrl(data);
+
+    if (!mediaUrl) {
+        throw new Error(LOG_PREFIX + ' No media URL returned for ' + trackId);
+    }
+
+    return mediaUrl;
+}
+
+// ---------------------------------------------------------------------------
+// Stream
+// ---------------------------------------------------------------------------
+
+/**
+ * Main stream entry point called by 8SPINE.
+ * Streaming now uses the media API instead of YouTube HLS manifests.
+ * 
+ * FIXED: Added retry logic to handle expired stream URLs on second play
  *
  * @param {string}  trackId
  * @param {string}  preferredQuality
  * @param {object}  context            — 8SPINE context object
- * @param {boolean} [forceDirectMp4]   — pass true to skip HLS and use mp4 directly
- *                                       (call this way if the player signals HLS failure)
  */
-async function getTrackStreamUrl(trackId, preferredQuality, context, forceDirectMp4 = false) {
+async function getTrackStreamUrl(trackId, preferredQuality, context) {
     const quality = context?.settings?.quality?.value || preferredQuality || QUALITY.HIGH;
-    console.log(LOG_PREFIX, 'Getting stream for', trackId, '| quality:', quality, '| forceDirectMp4:', forceDirectMp4);
+    console.log(LOG_PREFIX, 'Getting API stream for', trackId, '| quality label:', quality);
 
-    // Always hit the player endpoint fresh — never serve a stale/pre-fetched URL.
-    const sd = await fetchPlayerData(trackId);
+    let mediaUrl;
+    let lastError;
+    const maxRetries = 3;
 
-    if (!sd) throw new Error(LOG_PREFIX + ' No streaming data returned');
-
-    // Strategy 1: HLS manifest (preferred — native iOS/AVPlayer support)
-    // Only use if not explicitly asked to skip it.
-    if (!forceDirectMp4 && sd.hlsManifestUrl) {
-        console.log(LOG_PREFIX, 'Using HLS for', trackId);
-        return {
-            streamUrl: sd.hlsManifestUrl,
-            streamType: 'hls',
-            // Expose a fallback helper so the host player can call it if HLS fails.
-            onHlsError: () => getTrackStreamUrl(trackId, quality, context, true),
-            track: { id: trackId, audioQuality: quality },
-        };
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            mediaUrl = await getApiMediaUrl(trackId);
+            if (mediaUrl) {
+                console.log(LOG_PREFIX, 'Successfully got stream URL on attempt', attempt);
+                break;
+            }
+        } catch (error) {
+            lastError = error;
+            console.log(LOG_PREFIX, 'Attempt', attempt, 'failed:', error.message);
+            
+            if (attempt < maxRetries) {
+                // Wait before retrying (exponential backoff: 500ms, 1000ms, 1500ms)
+                const delayMs = 500 * attempt;
+                console.log(LOG_PREFIX, 'Retrying in', delayMs, 'ms...');
+                await new Promise(resolve => setTimeout(resolve, delayMs));
+            }
+        }
     }
 
-    // Strategy 2: Direct mp4 audio URL (fallback)
-    const mp4Url = pickMp4Url(sd, quality);
-    if (mp4Url) {
-        console.log(LOG_PREFIX, 'Using direct mp4 for', trackId);
-        return {
-            streamUrl: mp4Url,
-            streamType: 'mp4',
-            track: { id: trackId, audioQuality: quality },
-        };
+    if (!mediaUrl) {
+        throw lastError || new Error(LOG_PREFIX + ' Failed to get stream URL after ' + maxRetries + ' attempts');
     }
 
-    throw new Error(LOG_PREFIX + ' No playable audio found for ' + trackId);
+    return {
+        streamUrl: mediaUrl,
+        streamType: 'direct',
+        track: {
+            id: trackId,
+            audioQuality: quality,
+        },
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -307,6 +364,8 @@ async function getTrackStreamUrl(trackId, preferredQuality, context, forceDirect
  * `downloadQuality` setting is therefore a cosmetic label only; it is stored
  * in the returned track metadata so the app can display the chosen quality
  * to the user, but it does not change the actual file served.
+ * 
+ * FIXED: Added cache-busting and retry logic
  *
  * @param {string} trackId
  * @param {string} [quality]   — ignored by the API, kept for signature parity
@@ -316,18 +375,35 @@ async function getTrackDownloadUrl(trackId, quality, context) {
     const dlQuality = context?.settings?.downloadQuality?.value || quality || '128';
     console.log(LOG_PREFIX, 'Getting download URL for', trackId, '| quality label:', dlQuality);
 
-    const response = await fetch(DOWNLOAD_API_BASE + trackId + '?s=5');
-    if (!response.ok) {
-        throw new Error(LOG_PREFIX + ' Download API error: HTTP ' + response.status);
+    let mediaUrl;
+    let lastError;
+    const maxRetries = 3;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            mediaUrl = await getApiMediaUrl(trackId);
+            if (mediaUrl) {
+                console.log(LOG_PREFIX, 'Successfully got download URL on attempt', attempt);
+                break;
+            }
+        } catch (error) {
+            lastError = error;
+            console.log(LOG_PREFIX, 'Download attempt', attempt, 'failed:', error.message);
+            
+            if (attempt < maxRetries) {
+                const delayMs = 500 * attempt;
+                console.log(LOG_PREFIX, 'Retrying download in', delayMs, 'ms...');
+                await new Promise(resolve => setTimeout(resolve, delayMs));
+            }
+        }
     }
 
-    const data = await response.json();
-    if (!data.downloadUrl) {
-        throw new Error(LOG_PREFIX + ' No download URL returned for ' + trackId);
+    if (!mediaUrl) {
+        throw lastError || new Error(LOG_PREFIX + ' Failed to get download URL after ' + maxRetries + ' attempts');
     }
 
     return {
-        streamUrl: data.downloadUrl,
+        streamUrl: mediaUrl,
         track: {
             id: trackId,
             // Map the label to an internal quality tag for the app's metadata display.
@@ -424,7 +500,7 @@ return {
     name: 'YouTube',
     author: 'gk',
     logo: 'https://www.gstatic.com/youtube/img/branding/favicon/favicon_144x144_v2.png',
-    version: '1.0.1',
+    version: '1.0.3',
     labels: ['YouTube', 'Audio', 'Download', 'Settings'],
     description: 'Stream and download from YouTube. HLS preferred with automatic mp4 fallback.',
 
