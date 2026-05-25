@@ -330,7 +330,7 @@ async function getTrackStreamUrl(trackId, preferredQuality, context) {
             console.log(LOG_PREFIX, 'Attempt', attempt, 'failed:', error.message);
             
             if (attempt < maxRetries) {
-                // Wait before retrying (exponential backoff: 500ms, 1000ms, 1500ms)
+                // Wait before retrying (exponential backoff: 500ms, 1000ms, etc.)
                 const delayMs = 500 * attempt;
                 console.log(LOG_PREFIX, 'Retrying in', delayMs, 'ms...');
                 await new Promise(resolve => setTimeout(resolve, delayMs));
